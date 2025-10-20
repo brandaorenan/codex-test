@@ -92,18 +92,39 @@ serve(async (req) => {
 
 Sua tarefa é comparar produtos de dois mercados diferentes (Atacadão e Tenda) e encontrar o melhor par de produtos equivalentes.
 
-Critérios para considerar produtos equivalentes:
-1. Mesmo tipo de produto (ex: leite, arroz, sabão)
-2. Mesma marca (preferencialmente) ou marcas similares
-3. Mesma quantidade/peso (ou muito próximo)
-4. Mesma categoria (ex: integral, desnatado, etc)
+Critérios OBRIGATÓRIOS para produtos equivalentes:
+1. MESMA CATEGORIA - produtos devem ser exatamente do mesmo tipo
+   ❌ NÃO match: picanha fresca com hambúrguer
+   ❌ NÃO match: leite integral com leite condensado
+   ❌ NÃO match: arroz com farinha de arroz
+   ❌ NÃO match: carne fresca com caldo/tempero
+   ✅ OK: picanha angus com picanha angus
+
+2. MESMO NÍVEL DE PROCESSAMENTO
+   ❌ NÃO match: carne fresca com carne processada
+   ❌ NÃO match: produto natural com tempero/caldo
+   ✅ OK: ambos frescos ou ambos processados similarmente
+
+3. PESO/QUANTIDADE SIMILAR (tolerância de ±30%)
+   ✅ OK: 400g com 500g
+   ❌ NÃO match: 1kg com 100g
+
+4. MARCA (preferencialmente mesma marca, ou marcas equivalentes)
+   ✅ OK: mesma marca
+   ✅ OK: marcas diferentes mas mesmo nível (ambas premium ou ambas econômicas)
+
+SCORE DE CONFIANÇA:
+- 0.9-1.0: Produto idêntico ou quase idêntico (mesma marca, peso similar)
+- 0.7-0.89: Produtos equivalentes com pequenas diferenças (marcas diferentes mas categoria igual)
+- 0.6-0.69: Produtos similares mas com diferenças notáveis
+- <0.6: Produtos muito diferentes (NÃO retornar)
 
 Retorne APENAS um JSON válido no formato:
 {
   "match": {
-    "atacadao_index": number (índice do produto no array do Atacadão),
-    "tenda_index": number (índice do produto no array do Tenda),
-    "confianca": number (0.0 a 1.0, onde 1.0 é certeza absoluta)
+    "atacadao_index": number,
+    "tenda_index": number,
+    "confianca": number
   }
 }
 
@@ -112,7 +133,7 @@ Se NÃO houver nenhum par equivalente com confiança >= 0.6, retorne:
   "match": null
 }
 
-Priorize produtos com a mesma marca e quantidade similar.`
+IMPORTANTE: Seja rigoroso na categoria. É melhor retornar null do que comparar produtos incompatíveis.`
           },
           {
             role: 'user',

@@ -25,6 +25,22 @@ interface ComparisonResult {
   matchConfianca?: number
 }
 
+interface SearchAnalysis {
+  produto_tipo: string
+  produto_subtipo?: string
+  caracteristicas: string[]
+  marca_desejada?: string
+  quantidade_info?: string
+  peso_unidade?: string
+  termos_busca: {
+    principal: string
+    alternativo: string
+    generico: string
+  }
+  palavras_excluir: string[]
+  confianca: number
+}
+
 // Função auxiliar para encontrar o produto mais barato
 function encontrarMaisBarato(products: ProductResult[]): ProductResult | null {
   if (!products || products.length === 0) return null
@@ -33,7 +49,73 @@ function encontrarMaisBarato(products: ProductResult[]): ProductResult | null {
   )
 }
 
-// Função para fazer matching de produtos via LLM
+// Função auxiliar para analisar termo de busca (Camada 1)
+async function analyzeSearchTerm(
+  term: string,
+  supabaseUrl: string,
+  supabaseKey: string
+): Promise<SearchAnalysis | null> {
+  try {
+    const response = await fetch(`${supabaseUrl}/functions/v1/analyze-search-term`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseKey}`
+      },
+      body: JSON.stringify({ term })
+    })
+
+    if (!response.ok) {
+      console.error('Erro ao analisar termo:', await response.text())
+      return null
+    }
+
+    return await response.json()
+  } catch (error) {
+    console.error('Erro ao chamar analyze-search-term:', error)
+    return null
+  }
+}
+
+// Função auxiliar para filtrar produtos relevantes (Camada 2)
+async function filterRelevantProducts(
+  products: ProductResult[],
+  termoOriginal: string,
+  analysis: SearchAnalysis,
+  supabaseUrl: string,
+  supabaseKey: string
+): Promise<ProductResult[]> {
+  try {
+    const response = await fetch(`${supabaseUrl}/functions/v1/filter-products`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseKey}`
+      },
+      body: JSON.stringify({
+        products,
+        termo_original: termoOriginal,
+        produto_tipo: analysis.produto_tipo,
+        produto_subtipo: analysis.produto_subtipo,
+        caracteristicas: analysis.caracteristicas,
+        palavras_excluir: analysis.palavras_excluir
+      })
+    })
+
+    if (!response.ok) {
+      console.error('Erro ao filtrar produtos:', await response.text())
+      return products // Fallback: retornar produtos sem filtro
+    }
+
+    const data = await response.json()
+    return data.products
+  } catch (error) {
+    console.error('Erro ao chamar filter-products:', error)
+    return products // Fallback
+  }
+}
+
+// Função para fazer matching de produtos via LLM (Camada 3)
 async function matchProducts(
   atacadaoProducts: ProductResult[],
   tendaProducts: ProductResult[],
@@ -175,9 +257,27 @@ serve(async (req) => {
         continue // Pula este item
       }
       
-      console.log('Processando item:', { termoBusca, quantidade, tipo: typeof termoBusca })
+      console.log('\n' + '='.repeat(80))
+      console.log(`🔍 Processando item: "${termoBusca}" (${quantidade}x)`)
+      console.log('='.repeat(80))
       
-      // Buscar em ambas as APIs em paralelo
+      // 🔹 CAMADA 1: Analisar termo de busca
+      console.log(`\n[Camada 1] 🧠 Analisando termo de busca...`)
+      const analysis = await analyzeSearchTerm(termoBusca, supabaseUrl, supabaseKey)
+      
+      // Escolher termo de busca otimizado
+      let termoOtimizado = termoBusca
+      if (analysis) {
+        termoOtimizado = analysis.termos_busca.principal
+        console.log(`[Camada 1] ✅ Termo otimizado: "${termoOtimizado}"`)
+        console.log(`[Camada 1] 📦 Tipo: ${analysis.produto_tipo}${analysis.produto_subtipo ? ` / ${analysis.produto_subtipo}` : ''}`)
+        console.log(`[Camada 1] 🚫 Palavras para excluir: ${analysis.palavras_excluir.join(', ')}`)
+      } else {
+        console.log(`[Camada 1] ⚠️ Análise falhou, usando termo original`)
+      }
+      
+      // Buscar em ambas as APIs em paralelo com termo otimizado
+      console.log(`\n[Busca] 🔎 Buscando produtos nas APIs...`)
       const [atacadaoResponse, tendaResponse] = await Promise.all([
         fetch(`${supabaseUrl}/functions/v1/search-atacadao`, {
           method: 'POST',
@@ -185,7 +285,7 @@ serve(async (req) => {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${supabaseKey}`
           },
-          body: JSON.stringify({ term: termoBusca })
+          body: JSON.stringify({ term: termoOtimizado })
         }),
         fetch(`${supabaseUrl}/functions/v1/search-tenda`, {
           method: 'POST',
@@ -193,42 +293,82 @@ serve(async (req) => {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${supabaseKey}`
           },
-          body: JSON.stringify({ term: termoBusca })
+          body: JSON.stringify({ term: termoOtimizado })
         })
       ])
 
       const atacadaoData = atacadaoResponse.ok ? await atacadaoResponse.json() : { products: [] }
       const tendaData = tendaResponse.ok ? await tendaResponse.json() : { products: [] }
 
-      console.log(`Busca para "${termoBusca}": Atacadão=${atacadaoData.products?.length || 0} produtos, Tenda=${tendaData.products?.length || 0} produtos`)
+      console.log(`[Busca] 📊 Resultados brutos: Atacadão=${atacadaoData.products?.length || 0} produtos, Tenda=${tendaData.products?.length || 0} produtos`)
 
-      // Pegar listas de produtos
-      const atacadaoProducts = atacadaoData.products || []
-      const tendaProducts = tendaData.products || []
+      let atacadaoProducts = atacadaoData.products || []
+      let tendaProducts = tendaData.products || []
+
+      // 🔹 CAMADA 2: Filtrar produtos irrelevantes
+      if (analysis && (atacadaoProducts.length > 0 || tendaProducts.length > 0)) {
+        console.log(`\n[Camada 2] 🔍 Filtrando produtos irrelevantes...`)
+        
+        if (atacadaoProducts.length > 0) {
+          atacadaoProducts = await filterRelevantProducts(
+            atacadaoProducts,
+            termoBusca,
+            analysis,
+            supabaseUrl,
+            supabaseKey
+          )
+        }
+        
+        if (tendaProducts.length > 0) {
+          tendaProducts = await filterRelevantProducts(
+            tendaProducts,
+            termoBusca,
+            analysis,
+            supabaseUrl,
+            supabaseKey
+          )
+        }
+        
+        console.log(`[Camada 2] ✅ Após filtro: Atacadão=${atacadaoProducts.length} produtos, Tenda=${tendaProducts.length} produtos`)
+      }
 
       let atacadaoProduct: ProductResult | null = null
       let tendaProduct: ProductResult | null = null
       let matchConfianca: number | undefined = undefined
 
-      // Tentar matching inteligente se ambos mercados têm produtos
+      // 🔹 CAMADA 3: Matching inteligente
       if (atacadaoProducts.length > 0 && tendaProducts.length > 0) {
+        console.log(`\n[Camada 3] 🤝 Fazendo matching inteligente...`)
         const match = await matchProducts(atacadaoProducts, tendaProducts, supabaseUrl, supabaseKey)
         
-        if (match && match.confianca >= 0.7) {
-          // Usar produtos matched
+        if (match && match.confianca >= 0.6) {
           atacadaoProduct = atacadaoProducts[match.atacadao_index]
           tendaProduct = tendaProducts[match.tenda_index]
           matchConfianca = match.confianca
-          console.log(`Match encontrado para "${item}" com confiança ${match.confianca}`)
+          console.log(`[Camada 3] ✅ Match encontrado! Confiança: ${(match.confianca * 100).toFixed(0)}%`)
+          if (atacadaoProduct) {
+            console.log(`[Camada 3] 🛒 Atacadão: ${atacadaoProduct.nome} - R$ ${atacadaoProduct.preco.toFixed(2)}`)
+          }
+          if (tendaProduct) {
+            console.log(`[Camada 3] 🛒 Tenda: ${tendaProduct.nome} - R$ ${tendaProduct.preco.toFixed(2)}`)
+          }
+        } else {
+          console.log(`[Camada 3] ❌ Nenhum match confiável (usando fallback: mais barato de cada)`)
         }
       }
 
       // Fallback: se não houve match, pegar o mais barato de cada mercado
       if (!atacadaoProduct && atacadaoProducts.length > 0) {
         atacadaoProduct = encontrarMaisBarato(atacadaoProducts)
+        if (atacadaoProduct) {
+          console.log(`[Fallback] 🛒 Atacadão (mais barato): ${atacadaoProduct.nome} - R$ ${atacadaoProduct.preco.toFixed(2)}`)
+        }
       }
       if (!tendaProduct && tendaProducts.length > 0) {
         tendaProduct = encontrarMaisBarato(tendaProducts)
+        if (tendaProduct) {
+          console.log(`[Fallback] 🛒 Tenda (mais barato): ${tendaProduct.nome} - R$ ${tendaProduct.preco.toFixed(2)}`)
+        }
       }
 
       // Determinar melhor opção e calcular economia considerando quantidade
