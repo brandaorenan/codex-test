@@ -91,18 +91,40 @@ serve(async (req) => {
       )
     }
 
+    console.log('Items recebidos:', JSON.stringify(items, null, 2))
+
     // Normalizar items para garantir que temos ItemEstruturado[]
     const itemsEstruturados: ItemEstruturado[] = items.map(item => {
       // Se for string (retrocompatibilidade), converter
       if (typeof item === 'string') {
         return { termo_busca: item, quantidade: 1 }
       }
-      // Se for objeto, garantir que tem quantidade
-      return {
-        ...item,
-        quantidade: item.quantidade || 1
+      
+      // Se for objeto, extrair campos específicos e garantir que termo_busca existe
+      let termoBusca: string
+      
+      if (typeof item.termo_busca === 'string' && item.termo_busca.trim()) {
+        termoBusca = item.termo_busca.trim()
+      } else if (typeof item.item === 'string' && item.item.trim()) {
+        termoBusca = item.item.trim()
+      } else {
+        // Fallback: tentar JSON stringify e se falhar, usar uma string padrão
+        termoBusca = JSON.stringify(item)
+        console.warn('Não foi possível extrair termo_busca do item:', item)
       }
+      
+      const normalizado = {
+        termo_busca: termoBusca,
+        quantidade: Number(item.quantidade) || 1,
+        marca: item.marca || undefined,
+        observacao: item.observacao || undefined
+      }
+      
+      console.log('Item normalizado:', normalizado)
+      return normalizado
     })
+
+    console.log('Items estruturados:', JSON.stringify(itemsEstruturados, null, 2))
 
     // userId opcional para testes - não salvará no banco se não for fornecido
     const saveToDatabase = !!userId
@@ -138,8 +160,23 @@ serve(async (req) => {
     const allComparisons: any[] = []
 
     for (const itemEstruturado of itemsEstruturados) {
-      const item = itemEstruturado.termo_busca
-      const quantidade = itemEstruturado.quantidade || 1
+      // Garantir que termo_busca é sempre uma string
+      let termoBusca: string
+      let quantidade = 1
+      
+      if (typeof itemEstruturado === 'string') {
+        termoBusca = itemEstruturado
+        quantidade = 1
+      } else if (itemEstruturado && typeof itemEstruturado.termo_busca === 'string') {
+        termoBusca = String(itemEstruturado.termo_busca).trim()
+        quantidade = Number(itemEstruturado.quantidade) || 1
+      } else {
+        console.error('Erro: itemEstruturado inválido:', itemEstruturado)
+        continue // Pula este item
+      }
+      
+      console.log('Processando item:', { termoBusca, quantidade, tipo: typeof termoBusca })
+      
       // Buscar em ambas as APIs em paralelo
       const [atacadaoResponse, tendaResponse] = await Promise.all([
         fetch(`${supabaseUrl}/functions/v1/search-atacadao`, {
@@ -148,7 +185,7 @@ serve(async (req) => {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${supabaseKey}`
           },
-          body: JSON.stringify({ term: item })
+          body: JSON.stringify({ term: termoBusca })
         }),
         fetch(`${supabaseUrl}/functions/v1/search-tenda`, {
           method: 'POST',
@@ -156,12 +193,14 @@ serve(async (req) => {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${supabaseKey}`
           },
-          body: JSON.stringify({ term: item })
+          body: JSON.stringify({ term: termoBusca })
         })
       ])
 
       const atacadaoData = atacadaoResponse.ok ? await atacadaoResponse.json() : { products: [] }
       const tendaData = tendaResponse.ok ? await tendaResponse.json() : { products: [] }
+
+      console.log(`Busca para "${termoBusca}": Atacadão=${atacadaoData.products?.length || 0} produtos, Tenda=${tendaData.products?.length || 0} produtos`)
 
       // Pegar listas de produtos
       const atacadaoProducts = atacadaoData.products || []
@@ -213,7 +252,7 @@ serve(async (req) => {
       }
 
       resultados.push({
-        item,
+        item: termoBusca, // Garantir que sempre é uma string
         quantidade,
         atacadao: atacadaoProduct,
         tenda: tendaProduct,
@@ -248,7 +287,7 @@ serve(async (req) => {
 
         allComparisons.push({
           query_id: queryId,
-          item: `${quantidade}x ${item}`,
+          item: `${quantidade}x ${termoBusca}`,
           preco_atacadao: atacadaoProduct?.preco || null,
           preco_tenda: tendaProduct?.preco || null,
           melhor_opcao: melhorOpcao,
@@ -281,6 +320,9 @@ serve(async (req) => {
 
     // Calcular economia total
     const economiaTotal = resultados.reduce((sum, r) => sum + r.economia, 0)
+
+    // Debug: verificar estrutura antes de retornar
+    console.log('Resultados processados:', JSON.stringify(resultados.slice(0, 1), null, 2))
 
     return new Response(
       JSON.stringify({

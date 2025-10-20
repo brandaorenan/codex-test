@@ -51,12 +51,16 @@ export default function DashboardClient({ user }: DashboardClientProps) {
       // Passar itens estruturados completos (com quantidade)
       const items = processedData.items
 
+      console.log('Items processados pela IA:', items)
+
       toast.info(`${items.length} itens identificados. Comparando preços...`)
 
       // Segundo: chamar Edge Function de comparação
       const { data, error } = await supabase.functions.invoke('compare-prices', {
         body: { items, userId: user.id }
       })
+      
+      console.log('Resposta compare-prices:', { data, error })
 
       if (error) throw error
 
